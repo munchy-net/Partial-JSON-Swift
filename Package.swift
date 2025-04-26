@@ -4,21 +4,27 @@
 import PackageDescription
 
 let package = Package(
-    name: "Partial JSON Swift",
+    name: "PartialJSONSwift",
+    platforms: [
+        .iOS(.v13),
+        .macOS(.v10_15),
+        .tvOS(.v13),
+        .watchOS(.v6),
+    ],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
-            name: "Partial JSON Swift",
-            targets: ["Partial JSON Swift"]),
+            name: "PartialJSONSwift",
+            targets: ["PartialJSONSwift"]),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
-            name: "Partial JSON Swift"),
+            name: "PartialJSONSwift"),
         .testTarget(
-            name: "Partial JSON SwiftTests",
-            dependencies: ["Partial JSON Swift"]
+            name: "PartialJSONSwiftTests",
+            dependencies: ["PartialJSONSwift"]
         ),
     ]
 )
