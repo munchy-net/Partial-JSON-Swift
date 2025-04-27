@@ -1,5 +1,3 @@
-//
-//  PartialJSONSwift.swift
 //  PartialJSONSwift
 //
 //  A tiny, dependency-free utility for incrementally parsing streaming JSON.
@@ -14,360 +12,384 @@
 //
 //  All public symbols are documented inline.  ⌥-click a symbol in Xcode or open
 //  Quick Help to view the corresponding API docs.
-//
 
-import Foundation
 import Combine
+import Foundation
 
-// MARK: - Allow
+// MARK: - Allow -------------------------------------------------------------
 
-/// A bit-mask describing which JSON fragment *types* may be returned when the
-/// parser encounters **incomplete** input.
-///
-///   * If a type **is** included and the incoming data ends in the middle of a
-///     value of that type, the parser returns a *partial* representation rather
-///     than throwing `PartialJSONError.incomplete`.
-///   * If a type **is not** included the parser defers, throwing
-///     `PartialJSONError.incomplete`, so the caller can wait for more data.
-///
-/// Use the predefined convenience sets (`atom`, `collection`, `all`) for
-/// typical use-cases instead of building the mask manually.
 public struct Allow: OptionSet, Sendable {
-    /// Raw bit pattern.
-    public let rawValue: Int
+  public let rawValue: Int
 
-    // Individual fragment kinds ------------------------------------------------
-    /// String literals – e.g. `"hello"`.
-    public static let str       = Allow(rawValue: 1 << 0)
-    /// Ordinary numbers recognised by `JSONSerialization`.
-    public static let num       = Allow(rawValue: 1 << 1)
-    /// JSON arrays `[...]`.
-    public static let arr       = Allow(rawValue: 1 << 2)
-    /// JSON objects `{...}`.
-    public static let obj       = Allow(rawValue: 1 << 3)
-    /// The special literal `null`.
-    public static let null      = Allow(rawValue: 1 << 4)
-    /// Boolean literals `true` / `false`.
-    public static let bool      = Allow(rawValue: 1 << 5)
-    /// The non-standard literal `NaN`.
-    public static let nan       = Allow(rawValue: 1 << 6)
-    /// Positive infinity (`Infinity`).
-    public static let infinity  = Allow(rawValue: 1 << 7)
-    /// Negative infinity (`-Infinity`).
-    public static let _infinity = Allow(rawValue: 1 << 8)
+  public static let str = Self(rawValue: 1 << 0)
+  public static let num = Self(rawValue: 1 << 1)
+  public static let arr = Self(rawValue: 1 << 2)
+  public static let obj = Self(rawValue: 1 << 3)
+  public static let null = Self(rawValue: 1 << 4)
+  public static let bool = Self(rawValue: 1 << 5)
+  public static let nan = Self(rawValue: 1 << 6)
+  public static let infinity = Self(rawValue: 1 << 7)
+  public static let _infinity = Self(rawValue: 1 << 8)
 
-    // Convenience groups --------------------------------------------------------
-    /// Both `Infinity` and `-Infinity`.
-    public static let inf        : Allow = [.infinity, ._infinity]
-    /// All non-numeric single-token literals (`null`, `true`, `false`, `NaN`, ±∞).
-    public static let special    : Allow = [.null, .bool, .nan, .inf]
-    /// "Atomic" values: strings, numbers and the `special` group.
-    public static let atom       : Allow = [.str, .num, .special]
-    /// Container values: arrays and objects.
-    public static let collection : Allow = [.arr, .obj]
-    /// Every fragment kind.
-    public static let all        : Allow = [.atom, .collection]
+  public static let inf: Self = [.infinity, ._infinity]
+  public static let special: Self = [.null, .bool, .nan, .inf]
+  public static let atom: Self = [.str, .num, .special]
+  public static let collection: Self = [.arr, .obj]
+  public static let all: Self = [.atom, .collection]
 
-    /// Designated initializer.
-    public init(rawValue: Int) { self.rawValue = rawValue }
+  public init(rawValue: Int) { self.rawValue = rawValue }
 }
 
-// MARK: - Error types
+// MARK: - Errors ------------------------------------------------------------
 
-/// Thrown when the parser needs more characters to decide whether the current
-/// fragment is valid JSON.
 public enum PartialJSONError: Error, CustomStringConvertible, Sendable {
-    /// The parser reached end-of-input while still inside *what*.
-    case incomplete(String)
-
-    public var description: String {
-        switch self {
-        case .incomplete(let what):
-            return "Incomplete JSON – \(what)"
-        }
-    }
+  case incomplete(String)
+  public var description: String {
+    if case .incomplete(let w) = self { return "Incomplete JSON – \(w)" }
+    return ""
+  }
 }
 
-/// Thrown when the provided text can *never* form valid JSON (syntax error).
 public enum MalformedJSONError: Error, CustomStringConvertible, Sendable {
-    /// A user-friendly description of the syntax error.
-    case malformed(String)
-
-    public var description: String {
-        switch self {
-        case .malformed(let what):
-            return "Malformed JSON – \(what)"
-        }
-    }
+  case malformed(String)
+  public var description: String {
+    if case .malformed(let w) = self { return "Malformed JSON – \(w)" }
+    return ""
+  }
 }
 
-// MARK: - Synchronous parsing helper
+// MARK: - Synchronous helper ------------------------------------------------
 
-/// Parses **all** of `text` as JSON and returns the corresponding Foundation
-/// value (`String`, `NSNumber`, `[Any]`, `[String: Any]`, or `NSNull`).
-///
-/// The function throws:
-///  * `MalformedJSONError` – the syntax rules of JSON were violated.
-///  * `PartialJSONError.incomplete` – the input ended before a value finished
-///    *and* the unfinished value’s kind is *not* contained in `allow`.
 @discardableResult
 public func parseJSON(_ text: String, allow: Allow = .all) throws -> Any {
-    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else {
-        throw MalformedJSONError.malformed("empty input")
-    }
-    var scanner = Scanner(trimmed, allow: allow)
-    return try scanner.parseValue()
+  let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+  guard !trimmed.isEmpty else {
+    throw MalformedJSONError.malformed("empty input")
+  }
+  var scanner = Scanner(trimmed, allow: allow)
+  return try scanner.parseValue()
 }
 
-// MARK: - Observable streaming wrapper
+// MARK: - Streaming wrapper -------------------------------------------------
 
-/// `ObservableObject` that incrementally builds JSON from an arbitrary stream
-/// of `String` fragments (network frames, file chunks, LLM tokens, …).
-///
-/// Attach a `@StateObject` in SwiftUI and call `append(_:)` whenever new bytes
-/// arrive.  The latest fully-formed snapshot is published through `current`.
 @available(macOS 10.15, *)
 @MainActor
 public final class PartialJSONStream: ObservableObject, Sendable {
 
-    /// The most recent *complete* snapshot or a parse error.
-    @Published public private(set) var current: Any?
+  @Published public private(set) var current: Any?
 
-    private var lastGood: Any?
-    private var buffer   = ""
-    private let allow: Allow
+  private var lastGood: Any?
+  private var buffer = ""
+  private let allow: Allow
 
-    /// Create a new stream.
-    /// - Parameter allow: Fragment kinds that may be returned unfinished while
-    ///   awaiting more data.  Defaults to `Allow.all`.
-    public init(allow: Allow = .all) { self.allow = allow }
+  public init(allow: Allow = .all) { self.allow = allow }
 
-    /// Feed the next raw text chunk into the parser.
-    public func append(_ chunk: String) {
-        buffer.append(chunk)
-        do {
-            let value = try parseJSON(buffer, allow: allow)
-            current   = value
-            lastGood  = value
-        } catch is PartialJSONError {
-            // Still waiting – surface the last confirmed snapshot.
-            if let good = lastGood { current = good }
-        } catch {
-            // Fatal syntax error – surface it and stop updating.
-            current = error
-        }
+  public func append(_ chunk: String) {
+    buffer.append(chunk)
+    do {
+      let value = try parseJSON(buffer, allow: allow)
+      current = value
+      lastGood = value
+    } catch is PartialJSONError {
+      if let good = lastGood { current = good }
+    } catch {
+      current = error
     }
+  }
 
-    /// Reset **all** internal state (buffer and snapshots).
-    public func clear() {
-        buffer.removeAll(keepingCapacity: true)
-        current  = nil
-        lastGood = nil
-    }
+  public func clear() {
+    buffer.removeAll(keepingCapacity: true)
+    current = nil
+    lastGood = nil
+  }
 }
 
-// MARK: - Lexer / recursive-descent parser (internal)
+// MARK: - Recursive‑descent parser ------------------------------------------
 
-/// Internal helper that does the heavy lifting.  Single-pass, zero-allocation
-/// recursive-descent parser.  NOT thread-safe – call through `parseJSON`.
 private struct Scanner {
-    private let chars: [Character]
-    private var i: Int = 0
-    private let allow: Allow
+  private let chars: [Character]
+  private var i: Int = 0
+  private let allow: Allow
 
-    init(_ src: String, allow: Allow) {
-        chars = Array(src)
-        self.allow = allow
+  init(_ src: String, allow: Allow) {
+    chars = Array(src)
+    self.allow = allow
+  }
+
+  private var c: Character? { (i < chars.count) ? chars[i] : nil }
+  @inline(__always) private mutating func advance() { i += 1 }
+  @inline(__always) private mutating func skipWS() {
+    while let ch = c, " \n\r\t".contains(ch) { advance() }
+  }
+
+  // Entry ------------------------------------------------------------------
+  mutating func parseValue() throws -> Any {
+    skipWS()
+    guard let ch = c else { throw PartialJSONError.incomplete("unexpected EOF") }
+
+    switch ch {
+    case "\"": return try parseString()
+    case "{": return try parseObject()
+    case "[": return try parseArray()
+    case "-", "0"..."9": return try parseNumber()
+    default: return try parseLiterals()
+    }
+  }
+
+  // String -----------------------------------------------------------------
+  private mutating func parseString() throws -> String {
+    let start = i
+    var escape = false
+    advance()
+
+    while let ch = c {
+      if ch == "\\" {
+        escape.toggle()
+        advance()
+        continue
+      }
+      if ch == "\"", !escape {
+        advance()
+        let slice = String(chars[start..<i])
+        return try JSONSerialization.jsonObject(
+          with: Data(slice.utf8),
+          options: .fragmentsAllowed) as! String
+      }
+      escape = false
+      advance()
     }
 
-    private var c: Character? { (i < chars.count) ? chars[i] : nil }
-    @inline(__always) private mutating func advance() { i += 1 }
-    @inline(__always) private mutating func skipWS() {
-        while let ch = c, " \n\r\t".contains(ch) { advance() }
+    guard allow.contains(.str) else {
+      throw PartialJSONError.incomplete("unterminated string")
     }
 
-    // Entry-point --------------------------------------------------------------
-    mutating func parseValue() throws -> Any {
+    var slice = String(chars[(start + 1)..<i])
+    while !slice.isEmpty {
+      if let val = try? JSONSerialization.jsonObject(
+        with: Data(("\"" + slice + "\"").utf8),
+        options: .fragmentsAllowed) as? String
+      {
+        return val
+      }
+      slice.removeLast()
+    }
+    return ""
+  }
+
+  // Number -----------------------------------------------------------------
+  private mutating func parseNumber() throws -> Any {
+    @inline(__always) func match(_ s: String) -> Bool {
+      i + s.count <= chars.count && String(chars[i..<i + s.count]) == s
+    }
+    @inline(__always) func prefix(_ s: String) -> Bool {
+      let remain = chars.count - i
+      return remain < s.count && s.hasPrefix(String(chars[i..<chars.count]))
+    }
+
+    // ±Infinity / NaN first
+    if match("-Infinity") {
+      i += 9
+      return -Double.infinity
+    }
+    if match("-NaN") {
+      i += 4
+      return Double.nan
+    }
+
+    if prefix("-Infinity") {
+      if allow.contains(._infinity) {
+        i = chars.count
+        return -Double.infinity
+      }
+      throw MalformedJSONError.malformed("unexpected -Infinity")
+    }
+    if prefix("-NaN") {
+      if allow.contains(.nan) {
+        i = chars.count
+        return Double.nan
+      }
+      throw MalformedJSONError.malformed("unexpected NaN")
+    }
+
+    let start = i
+    if c == "-" { advance() }
+    while let ch = c, "-+.eE0123456789".contains(ch) {
+      if ",]} \n\r\t".contains(ch) { break }
+      advance()
+    }
+    var slice = String(chars[start..<i])
+
+    if let val = try? JSONSerialization.jsonObject(
+      with: Data(slice.utf8), options: .fragmentsAllowed)
+    {
+      return val
+    }
+
+    guard allow.contains(.num) else {
+      throw PartialJSONError.incomplete("number literal")
+    }
+
+    while let last = slice.last, ".eE+-".contains(last) {
+      slice.removeLast()
+      if !slice.isEmpty,
+        let val = try? JSONSerialization.jsonObject(
+          with: Data(slice.utf8), options: .fragmentsAllowed)
+      {
+        return val
+      }
+    }
+    throw PartialJSONError.incomplete("number literal")
+  }
+
+  // Array ------------------------------------------------------------------
+  private mutating func parseArray() throws -> [Any] {
+    var result: [Any] = []
+    advance()
+    skipWS()
+
+    while c != nil, c != "]" {
+
+      // --- optimistic placeholder for container values ----------------
+      var placeholderIndex: Int? = nil
+      if let ch = c, ch == "{" || ch == "[" {
+        placeholderIndex = result.count
+        result.append(NSNull())
+      }
+
+      do {
+        let value = try parseValue()
+        if let idx = placeholderIndex {
+          result[idx] = value
+        } else {
+          result.append(value)
+        }
+      } catch let err as PartialJSONError {
+        guard allow.contains(.arr) else { throw err }
+        i = chars.count
+        return result
+      }
+
+      skipWS()
+      if c == "," {
+        advance()
         skipWS()
-        guard let ch = c else { throw PartialJSONError.incomplete("unexpected EOF") }
-
-        switch ch {
-        case "\"":              return try parseString()
-        case "{":                 return try parseObject()
-        case "[":                 return try parseArray()
-        case "-", "0"..."9":   return try parseNumber()
-        default:                   return try parseLiterals()
-        }
+      }
     }
 
-    // String ------------------------------------------------------------------
-    private mutating func parseString() throws -> String {
-        let start = i
-        var escape = false
-        advance() // skip opening quote
-
-        while let ch = c {
-            if ch == "\\" { escape.toggle(); advance(); continue }
-            if ch == "\"", !escape {
-                advance()
-                let slice = String(chars[start..<i])
-                // Use JSONSerialization to unescape sequences correctly.
-                return try JSONSerialization.jsonObject(
-                    with: Data(slice.utf8),
-                    options: [.fragmentsAllowed]) as! String
-            }
-            escape = false; advance()
-        }
-
-        // Ran out of input -----------------------------------------------------
-        guard allow.contains(.str) else {
-            throw PartialJSONError.incomplete("unterminated string")
-        }
-        // Return the *raw* (still-escaped) string sans opening quote.
-        return String(chars[(start + 1)..<i])
+    if c == "]" {
+      advance()
+    } else if !allow.contains(.arr) {
+      throw PartialJSONError.incomplete("array")
     }
+    return result
+  }
 
-    // Number ------------------------------------------------------------------
-    private mutating func parseNumber() throws -> Any {
-        @inline(__always)
-        func match(_ str: String) -> Bool {
-            i + str.count <= chars.count &&
-            String(chars[i..<i + str.count]) == str
-        }
-        @inline(__always)
-        func prefix(_ str: String) -> Bool {
-            let remain = chars.count - i
-            return remain < str.count &&
-                   str.hasPrefix(String(chars[i..<chars.count]))
-        }
+  // Object -----------------------------------------------------------------
+  private mutating func parseObject() throws -> [String: Any] {
+    var result: [String: Any] = [:]
+    var currentKey: String? = nil
+    advance()
+    skipWS()
 
-        // Handle non-standard ±∞ / NaN first so JSONSerialization doesn’t choke.
-        if match("-Infinity") { i += 9; return -Double.infinity }
-        if match("-NaN")      { i += 4; return -Double.nan     }
-        if prefix("-Infinity") || prefix("-NaN") {
-            throw PartialJSONError.incomplete("literal")
-        }
+    parsing: while true {
+      guard let ch = c, ch != "}" else { break parsing }
 
-        let start = i
-        if c == "-" { advance() }
-        while let ch = c, "-+.eE0123456789".contains(ch) {
-            if ",]} \n\r\t".contains(ch) { break }
-            advance()
-        }
-        var slice = String(chars[start..<i])
+      do {
+        // ----- key --------------------------------------------------
+        guard ch == "\"" else { throw PartialJSONError.incomplete("object key") }
+        currentKey = try parseString()
+        guard let key = currentKey else { throw PartialJSONError.incomplete("object key") }
+        skipWS()
 
-        // Try the cheap route first.
-        if let val = try? JSONSerialization.jsonObject(
-                        with: Data(slice.utf8), options: [.fragmentsAllowed]) {
-            return val
-        }
+        // ----- colon ------------------------------------------------
+        guard c == ":" else { throw PartialJSONError.incomplete("missing ':'") }
+        advance()
+        skipWS()
 
-        // If JSONSerialization failed, we might be missing a digit.
-        guard allow.contains(.num) else {
-            throw PartialJSONError.incomplete("number literal")
-        }
+        // ----- value ------------------------------------------------
+        result[key] = try parseValue()
+        skipWS()
 
-        // Trim trailing punctuation until it parses or we give up.
-        while let last = slice.last, ".eE+-".contains(last) {
-            slice.removeLast()
-            if !slice.isEmpty,
-               let val = try? JSONSerialization.jsonObject(
-                           with: Data(slice.utf8), options: [.fragmentsAllowed]) {
-                return val
-            }
+        if c == "," {
+          advance()
+          skipWS()
         }
-        throw PartialJSONError.incomplete("number literal")
-    }
-
-    // Array -------------------------------------------------------------------
-    private mutating func parseArray() throws -> [Any] {
-        var result: [Any] = []
-        advance(); skipWS()
-        while c != nil, c != "]" {
-            do {
-                result.append(try parseValue())
-            } catch let err as PartialJSONError {
-                // Preserve positional integrity with a placeholder.
-                result.append(NSNull())
-                throw err
-            }
-            skipWS()
-            if c == "," { advance(); skipWS() }
+      } catch let err as PartialJSONError {
+        if let k = currentKey, result[k] == nil {
+          result[k] = NSNull()
         }
-        if c == "]" { advance() }
-        else if !allow.contains(.arr) {
-            throw PartialJSONError.incomplete("array")
-        }
+        guard allow.contains(.obj) else { throw err }
+        i = chars.count
         return result
+      }
     }
 
-    // Object ------------------------------------------------------------------
-    private mutating func parseObject() throws -> [String: Any] {
-        var result: [String: Any] = [:]
-        advance(); skipWS()
+    if c == "}" {
+      advance()
+    } else if !allow.contains(.obj) {
+      throw PartialJSONError.incomplete("object")
+    }
+    return result
+  }
 
-        while c != nil, c != "}" {
-            guard c == "\"" else {
-                throw PartialJSONError.incomplete("object key")
-            }
-            let key = try parseString()
-            skipWS()
-
-            guard c == ":" else {
-                throw PartialJSONError.incomplete("missing ':'")
-            }
-            advance(); skipWS()
-
-            do {
-                result[key] = try parseValue()
-                skipWS()
-                if c == "," { advance(); skipWS() }
-            } catch let err as PartialJSONError {
-                result[key] = NSNull()
-                throw err
-            }
-        }
-
-        if c == "}" { advance() }
-        else if !allow.contains(.obj) {
-            throw PartialJSONError.incomplete("object")
-        }
-        return result
+  // Literals ---------------------------------------------------------------
+  private mutating func parseLiterals() throws -> Any {
+    @inline(__always) func match(_ s: String) -> Bool {
+      i + s.count <= chars.count && String(chars[i..<i + s.count]) == s
+    }
+    @inline(__always) func prefix(_ s: String) -> Bool {
+      let remain = chars.count - i
+      return remain < s.count && s.hasPrefix(String(chars[i..<chars.count]))
+    }
+    @inline(__always) func acceptPartial<T>(
+      _ flag: Allow,
+      _ value: @autoclosure () -> T,
+      name: String
+    ) throws -> Any {
+      if allow.contains(flag) {
+        i = chars.count
+        return value()
+      }
+      throw MalformedJSONError.malformed("unexpected \(name)")
     }
 
-    // Literals ----------------------------------------------------------------
-    private mutating func parseLiterals() throws -> Any {
-        @inline(__always)
-        func match(_ full: String) -> Bool {
-            i + full.count <= chars.count &&
-            String(chars[i..<i + full.count]) == full
-        }
-        @inline(__always)
-        func prefix(_ full: String) -> Bool {
-            let remain = chars.count - i
-            return remain < full.count &&
-                   String(chars[i..<chars.count]) == full.prefix(remain)
-        }
+    switch true {
+    // complete literals
+    case match("null"):
+      i += 4
+      return NSNull()
+    case match("true"):
+      i += 4
+      return true
+    case match("false"):
+      i += 5
+      return false
+    case match("-Infinity"):
+      i += 9
+      return -Double.infinity
+    case match("Infinity"):
+      i += 8
+      return Double.infinity
+    case match("NaN"):
+      i += 3
+      return Double.nan
 
-        switch true {
-        case match("null"):
-            i += 4; return NSNull()
-        case match("true"):
-            i += 4; return true
-        case match("false"):
-            i += 5; return false
-        case match("Infinity"):
-            i += 8; return Double.infinity
-        case match("NaN"):
-            i += 3; return Double.nan
+    // partial openers
+    case prefix("null"):
+      return try acceptPartial(.null, NSNull(), name: "null")
+    case prefix("true"):
+      return try acceptPartial(.bool, true, name: "boolean")
+    case prefix("false"):
+      return try acceptPartial(.bool, false, name: "boolean")
+    case prefix("-Infinity"):
+      return try acceptPartial(._infinity, -Double.infinity, name: "-Infinity")
+    case prefix("Infinity"):
+      return try acceptPartial(.infinity, Double.infinity, name: "Infinity")
+    case prefix("NaN"):
+      return try acceptPartial(.nan, Double.nan, name: "NaN")
 
-        case prefix("null"), prefix("true"), prefix("false"),
-             prefix("Infinity"), prefix("NaN"):
-            throw PartialJSONError.incomplete("literal")
-
-        default:
-            throw MalformedJSONError.malformed("unexpected token")
-        }
+    default:
+      throw MalformedJSONError.malformed("unexpected token")
     }
+  }
 }
