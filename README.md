@@ -34,7 +34,7 @@ If you need other languages, check out:
 Add the dependency to **Package.swift**:
 
 ```swift
-.package(url: "https://github.com/ItsJustMeChris/Partial-JSON-Swift.git", from: "1.0.0"),
+.package(url: "https://github.com/munchy-net/Partial-JSON-Swift.git", from: "1.0.0"),
 ```
 
 and declare a minimum platform that already ships with Combine:
